@@ -41,6 +41,8 @@ from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, Ber
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 
+from crf import CRF
+
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
@@ -48,43 +50,6 @@ logger = logging.getLogger(__name__)
 
 
 class MyBertForTokenClassification(BertPreTrainedModel):
-    """BERT model for token-level classification.
-    This module is composed of the BERT model with a linear layer on top of
-    the full hidden state of the last layer.
-    Params:
-        `config`: a BertConfig class instance with the configuration to build a new model.
-        `num_labels`: the number of classes for the classifier. Default = 2.
-    Inputs:
-        `input_ids`: a torch.LongTensor of shape [batch_size, sequence_length]
-            with the word token indices in the vocabulary(see the tokens preprocessing logic in the scripts
-            `extract_features.py`, `run_classifier.py` and `run_squad.py`)
-        `token_type_ids`: an optional torch.LongTensor of shape [batch_size, sequence_length] with the token
-            types indices selected in [0, 1]. Type 0 corresponds to a `sentence A` and type 1 corresponds to
-            a `sentence B` token (see BERT paper for more details).
-        `attention_mask`: an optional torch.LongTensor of shape [batch_size, sequence_length] with indices
-            selected in [0, 1]. It's a mask to be used if the input sequence length is smaller than the max
-            input sequence length in the current batch. It's the mask that we typically use for attention when
-            a batch has varying length sentences.
-        `labels`: labels for the classification output: torch.LongTensor of shape [batch_size, sequence_length]
-            with indices selected in [0, ..., num_labels].
-    Outputs:
-        if `labels` is not `None`:
-            Outputs the CrossEntropy classification loss of the output with the labels.
-        if `labels` is `None`:
-            Outputs the classification logits of shape [batch_size, sequence_length, num_labels].
-    Example usage:
-    ```python
-    # Already been converted into WordPiece token ids
-    input_ids = torch.LongTensor([[31, 51, 99], [15, 5, 0]])
-    input_mask = torch.LongTensor([[1, 1, 1], [1, 1, 0]])
-    token_type_ids = torch.LongTensor([[0, 0, 1], [0, 1, 0]])
-    config = BertConfig(vocab_size_or_config_json_file=32000, hidden_size=768,
-        num_hidden_layers=12, num_attention_heads=12, intermediate_size=3072)
-    num_labels = 2
-    model = BertForTokenClassification(config, num_labels)
-    logits = model(input_ids, token_type_ids, input_mask)
-    ```
-    """
     def __init__(self, config, num_labels):
         super(MyBertForTokenClassification, self).__init__(config)
         self.num_labels = num_labels
@@ -107,7 +72,67 @@ class MyBertForTokenClassification(BertPreTrainedModel):
             loss = loss_fct(active_logits, active_labels)
             return loss
         else:
-            return logits
+            return logits # for each subtoken
+        
+        
+class MyBertPlusCRFForTokenClassification(BertPreTrainedModel):
+    def __init__(self, config, num_labels, device):
+        super(MyBertPlusCRFForTokenClassification, self).__init__(config)
+        self.num_labels = num_labels
+        self.device = device
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, num_labels+3) # +3 for bos, eos, pad
+        self.crf = CRF(num_labels, device=device).to(device)
+        self.apply(self.init_bert_weights)
+
+class MyBertPlusCRFForTokenClassification(BertPreTrainedModel):
+    def __init__(self, config, num_labels, device):
+        super(MyBertPlusCRFForTokenClassification, self).__init__(config)
+        self.num_labels = num_labels
+        self.device = device
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, num_labels+3) # +3 for bos, eos, pad
+        self.crf = CRF(num_labels, device=device).to(device)
+        self.apply(self.init_bert_weights)
+
+    def forward(self, input_ids, token_type_ids, attention_mask, labels=None, label_mask=None):
+        sequence_output, _ = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
+        sequence_output = self.classifier(self.dropout(sequence_output))
+        
+        if labels is not None:
+            orig_seq_len = sequence_output.size(1)
+            seq_logits_list, seq_labels_list, seq_mask_list = [], [], []
+            for seq_logits, seq_labels, seq_mask in zip(sequence_output, labels, label_mask):
+                seq_logits = seq_logits[seq_mask != 0].unsqueeze(0) # `!= 0` seems to be important here
+                seq_logits = torch.cat([seq_logits, seq_logits.new_zeros((1, orig_seq_len - seq_logits.size(1), seq_logits.size(2)))], 1)
+                
+                seq_labels = seq_labels[seq_mask != 0].unsqueeze(0)
+                seq_mask = torch.cat([seq_labels.new_ones((1, seq_labels.size(1))), seq_labels.new_zeros((1, orig_seq_len - seq_labels.size(1)))], 1)
+                seq_labels = torch.cat([seq_labels, seq_labels.new_zeros((1, orig_seq_len - seq_labels.size(1)))], 1)
+                
+                seq_logits_list.append(seq_logits)
+                seq_labels_list.append(seq_labels)
+                seq_mask_list.append(seq_mask)
+            cat_seq_logits = torch.cat(seq_logits_list, 0)
+            cat_seq_labels = torch.cat(seq_labels_list, 0)
+            cat_seq_mask = torch.cat(seq_mask_list, 0)
+            
+            return self.crf(cat_seq_logits, cat_seq_labels, mask=cat_seq_mask)
+        else:
+            return_logits_list = []
+            for seq_logits, seq_mask in zip(sequence_output, label_mask): # inefficient, need to optimize later
+                seq_logits = seq_logits[seq_mask != 0].unsqueeze(0)
+                _, path = self.crf.decode(seq_logits) # use Viterbi
+                return_logits = torch.ones((sequence_output.size(1), self.num_labels)).to(self.device)
+                i_path = 0
+                for j_seq_mask in range(len(seq_mask)):
+                    if seq_mask[j_seq_mask] != 0:
+                        return_logits[j_seq_mask][path[0][i_path]] = 10000
+                        i_path += 1
+                return_logits_list.append(return_logits.unsqueeze(0))
+            return torch.cat(return_logits_list, 0)
 
 
 class InputExample(object):
@@ -233,7 +258,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         # used as as the "sentence vector". Note that this only makes sense because
         # the entire model is fine-tuned.
 
-        input_ids = tokenizer.convert_tokens_to_ids(bert_tokens)
+        input_ids = tokenizer.convert_tokens_to_ids(bert_tokens) # [CLS] - start, [SEP] - end, [PAD] - padding
 
         # The mask has 1 for real tokens and 0 for padding tokens. Only real
         # tokens are attended to.
@@ -513,9 +538,9 @@ def main():
             previous_state_dict = OrderedDict()
         distant_state_dict = torch.load(os.path.join(args.trained_model_dir, WEIGHTS_NAME))
         previous_state_dict.update(distant_state_dict) # note that the final layers of previous model and distant model must have different attribute names!
-        model = MyBertForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels)
+        model = MyBertPlusCRFForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels, device=device) # hardcode
     else:
-        model = MyBertForTokenClassification.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=num_labels)
+        model = MyBertPlusCRFForTokenClassification.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=num_labels, device=device) # hardcode
     if args.fp16:
         model.half()
     model.to(device)
@@ -724,7 +749,7 @@ def main():
 
             with torch.no_grad():
                 tmp_test_loss = model(input_ids, segment_ids, input_mask, label_ids, label_mask)
-                logits = model(input_ids, segment_ids, input_mask)
+                logits = model(input_ids, segment_ids, input_mask, label_mask=label_mask)
 
             logits = logits.detach().cpu().numpy()
             label_ids = label_ids.to('cpu').numpy()
