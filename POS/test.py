@@ -416,6 +416,8 @@ def main():
     parser.add_argument('--coarse_tagset',
                         action='store_true',
                         help="Whether to save model in each epoch")
+    parser.add_argument('--OOD', default=0, type=int,
+                        help="Whether to save model in each epoch")
     args = parser.parse_args()
 
     if args.local_rank == -1 or args.no_cuda:
@@ -462,7 +464,11 @@ def main():
     model.to(device)
 
     if args.do_test and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        test_examples = processor.get_sep_PPCEME_test_examples(args.data_dir)
+        if args.OOD:
+            test_examples = processor.get_sep_PPCEME_test_examples(args.data_dir)
+        else:
+            test_examples = processor.get_PTB_dev_examples(args.data_dir)
+
         test_features = convert_examples_to_features(
             test_examples, label_list, args.max_seq_length, tokenizer)
         logger.info("***** Running final test *****")
@@ -515,12 +521,15 @@ def main():
         test_accuracy = test_accuracy / nb_test_examples # micro average
         result = {'test_loss': test_loss,
                   'test_accuracy': test_accuracy}
+        with open('result.txt', 'a') as fout:
+            fout.write('OOD: {}, test_loss: {}, test_acc: {}\n'.format(args.OOD, test_loss,test_accuracy))
 
         output_test_file = os.path.join(args.output_dir, "test_results.txt")
         with open(output_test_file, "w") as writer:
             logger.info("***** Test results *****")
             for key in sorted(result.keys()):
                 logger.info("  %s = %s", key, str(result[key]))
+
                 writer.write("%s = %s\n" % (key, str(result[key])))
 
         pickle.dump(test_errors, open(os.path.join(args.output_dir, "test_errors.pkl"), "wb"))

@@ -503,6 +503,8 @@ def main():
     parser.add_argument('--supervised_training',
                         action='store_true',
                         help="Only use this for supervised top-line model")
+    parser.add_argument('--OOD', default=0, type=int,
+                        help="Whether to save model in each epoch")
     args = parser.parse_args()
 
     if args.local_rank == -1 or args.no_cuda:
@@ -551,7 +553,11 @@ def main():
     model.to(device)
 
     if args.do_test and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        test_examples = processor.get_sep_twitter_test_examples(args.data_dir)
+        if args.OOD:
+            test_examples = processor.get_sep_twitter_test_examples(args.data_dir)
+        else:
+            test_examples = processor.get_conll_dev_examples(args.data_dir)
+
         test_features = convert_examples_to_features(
             test_examples, label_list, args.max_seq_length, tokenizer)
         logger.info("***** Running final test *****")
@@ -608,9 +614,12 @@ def main():
 
         test_loss = test_loss / nb_test_steps
         test_accuracy = test_accuracy / nb_test_examples # micro average
+        test_f1 = compute_f1(test_TP, test_FP, test_FN)
         result = {'test_loss': test_loss,
                   'test_accuracy': test_accuracy,
-                  'test_f1': compute_f1(test_TP, test_FP, test_FN)}
+                  'test_f1': test_f1}
+        with open('result.txt', 'a') as fout:
+            fout.write('OOD: {}, test_loss: {}, test_acc: {}, test_F1: {}\n'.format(args.OOD, test_loss,test_accuracy, test_f1))
 
         output_test_file = os.path.join(args.output_dir, "test_results.txt")
         with open(output_test_file, "w") as writer:
