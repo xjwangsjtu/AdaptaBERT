@@ -541,6 +541,36 @@ def main():
     param_optimizer = list(model.named_parameters())
     if args.freeze_bert: # freeze BERT if needed
         frozen = ['bert']
+    elif args.partially_freeze_bert != -1:
+        if args.partially_freeze_bert not in [3,6,9]:
+            raise ValueError("can only freeze 3, 6, or 9 layers")
+        elif args.partially_freeze_bert == 3:
+            frozen = ['bert.embeddings.',
+                      'bert.encoder.layer.0.',
+                      'bert.encoder.layer.1.',
+                      'bert.encoder.layer.2.',
+                     ]
+        elif args.partially_freeze_bert == 6:
+            frozen = ['bert.embeddings.',
+                      'bert.encoder.layer.0.',
+                      'bert.encoder.layer.1.',
+                      'bert.encoder.layer.2.',
+                      'bert.encoder.layer.3.',
+                      'bert.encoder.layer.4.',
+                      'bert.encoder.layer.5.',
+                     ]
+        elif args.partially_freeze_bert == 9:
+            frozen = ['bert.embeddings.',
+                      'bert.encoder.layer.0.',
+                      'bert.encoder.layer.1.',
+                      'bert.encoder.layer.2.',
+                      'bert.encoder.layer.3.',
+                      'bert.encoder.layer.4.',
+                      'bert.encoder.layer.5.',
+                      'bert.encoder.layer.6.',
+                      'bert.encoder.layer.7.',
+                      'bert.encoder.layer.8.',
+                     ]
     else:
         frozen = []
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -548,6 +578,13 @@ def main():
         {'params': [p for n, p in param_optimizer if (not any(fr in n for fr in frozen)) and (not any(nd in n for nd in no_decay))], 'weight_decay': 0.01},
         {'params': [p for n, p in param_optimizer if (not any(fr in n for fr in frozen)) and (any(nd in n for nd in no_decay))], 'weight_decay': 0.0}
         ]
+    param_size = 0
+    for d in optimizer_grouped_parameters:
+        for p in d['params']:
+            tmp_p = p.clone().detach()
+            param_size += torch.numel(tmp_p)
+    logger.info("  Parameter size = %d", param_size)
+    
     if args.fp16:
         try:
             from apex.optimizers import FP16_Optimizer
