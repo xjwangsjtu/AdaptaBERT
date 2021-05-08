@@ -41,6 +41,8 @@ from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, Ber
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 
+from crf import CRF
+
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
@@ -109,6 +111,56 @@ class MyBertForTokenClassification(BertPreTrainedModel):
         else:
             return logits
 
+
+class MyBertPlusCRFForTokenClassification(BertPreTrainedModel):
+    def __init__(self, config, num_labels, device):
+        super(MyBertPlusCRFForTokenClassification, self).__init__(config)
+        self.num_labels = num_labels
+        self.device = device
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, num_labels + 3)  # +3 for bos, eos, pad
+        self.crf = CRF(num_labels, device=device).to(device)
+        self.apply(self.init_bert_weights)
+
+    def forward(self, input_ids, token_type_ids, attention_mask, labels=None, label_mask=None):
+        sequence_output, _ = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
+        sequence_output = self.classifier(self.dropout(sequence_output))
+
+        if labels is not None:
+            orig_seq_len = sequence_output.size(1)
+            seq_logits_list, seq_labels_list, seq_mask_list = [], [], []
+            for seq_logits, seq_labels, seq_mask in zip(sequence_output, labels, label_mask):
+                seq_logits = seq_logits[seq_mask != 0].unsqueeze(0)  # `!= 0` seems to be important here
+                seq_logits = torch.cat(
+                    [seq_logits, seq_logits.new_zeros((1, orig_seq_len - seq_logits.size(1), seq_logits.size(2)))], 1)
+
+                seq_labels = seq_labels[seq_mask != 0].unsqueeze(0)
+                seq_mask = torch.cat([seq_labels.new_ones((1, seq_labels.size(1))),
+                                      seq_labels.new_zeros((1, orig_seq_len - seq_labels.size(1)))], 1)
+                seq_labels = torch.cat([seq_labels, seq_labels.new_zeros((1, orig_seq_len - seq_labels.size(1)))], 1)
+
+                seq_logits_list.append(seq_logits)
+                seq_labels_list.append(seq_labels)
+                seq_mask_list.append(seq_mask)
+            cat_seq_logits = torch.cat(seq_logits_list, 0)
+            cat_seq_labels = torch.cat(seq_labels_list, 0)
+            cat_seq_mask = torch.cat(seq_mask_list, 0)
+
+            return self.crf(cat_seq_logits, cat_seq_labels, mask=cat_seq_mask)
+        else:
+            return_logits_list = []
+            for seq_logits, seq_mask in zip(sequence_output, label_mask):  # inefficient, need to optimize later
+                seq_logits = seq_logits[seq_mask != 0].unsqueeze(0)
+                _, path = self.crf.decode(seq_logits)  # use Viterbi
+                return_logits = torch.ones((sequence_output.size(1), self.num_labels)).to(self.device)
+                i_path = 0
+                for j_seq_mask in range(len(seq_mask)):
+                    if seq_mask[j_seq_mask] != 0:
+                        return_logits[j_seq_mask][path[0][i_path]] = 10000
+                        i_path += 1
+                return_logits_list.append(return_logits.unsqueeze(0))
+            return torch.cat(return_logits_list, 0)
 
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
@@ -460,7 +512,7 @@ def main():
 
     tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
 
-    model = MyBertForTokenClassification.from_pretrained(args.trained_model_dir, num_labels=num_labels)
+    model = MyBertPlusCRFForTokenClassification.from_pretrained(args.trained_model_dir, num_labels=num_labels, device=device) # hardcode
     model.to(device)
 
     if args.do_test and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
@@ -522,7 +574,12 @@ def main():
         result = {'test_loss': test_loss,
                   'test_accuracy': test_accuracy}
         with open('result.txt', 'a') as fout:
-            fout.write('OOD: {}, test_loss: {}, test_acc: {}\n'.format(args.OOD, test_loss,test_accuracy))
+            fout.write(
+                'OOD: {}, num_of_train_epochs: {}, test_loss: {}, test_acc: {}, seed: {}\n'.format(args.OOD,
+                                                                                                   args.num_train_epochs,
+                                                                                                   test_loss,
+                                                                                                   test_accuracy,
+                                                                                                   args.seed))
 
         output_test_file = os.path.join(args.output_dir, "test_results.txt")
         with open(output_test_file, "w") as writer:
