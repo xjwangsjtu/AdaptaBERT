@@ -458,6 +458,10 @@ def main():
     parser.add_argument('--supervised_training',
                         action='store_true',
                         help="Only use this for supervised top-line model")
+    parser.add_argument('--partially_freeze_bert',
+                        type=int,
+                        default=-1,
+                        help="number of bottom layers frozen")
     parser.add_argument('--use_crf',
                         action='store_true',
                         help="whether to use CRF")
