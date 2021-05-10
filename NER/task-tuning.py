@@ -553,7 +553,7 @@ def main():
         if args.use_crf:
             model = MyBertPlusCRFForTokenClassification.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=num_labels, device=device)
         else:
-            model = MyBertForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels)
+            model = MyBertForTokenClassification.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=num_labels)
     if args.fp16:
         model.half()
     model.to(device)
