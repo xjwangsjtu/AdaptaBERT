@@ -25,7 +25,7 @@ import random
 import sys
 import pickle
 
-os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 import numpy as np
 import torch
@@ -505,6 +505,9 @@ def main():
                         help="Only use this for supervised top-line model")
     parser.add_argument('--OOD', default=0, type=int,
                         help="Whether to save model in each epoch")
+    parser.add_argument('--use_crf',
+                        action='store_true',
+                        help="whether to use CRF")
     args = parser.parse_args()
 
     if args.local_rank == -1 or args.no_cuda:
@@ -549,7 +552,10 @@ def main():
     train_examples = None
     num_train_optimization_steps = None
 
-    model = MyBertPlusCRFForTokenClassification.from_pretrained(args.trained_model_dir, num_labels=num_labels, device=device) # hardcode
+    if args.use_crf:
+        model = MyBertPlusCRFForTokenClassification.from_pretrained(args.trained_model_dir, num_labels=num_labels, device=device)
+    else:
+        model = MyBertForTokenClassification.from_pretrained(args.trained_model_dir, num_labels=num_labels)
     model.to(device)
 
     if args.do_test and (args.local_rank == -1 or torch.distributed.get_rank() == 0):

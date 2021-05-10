@@ -25,7 +25,7 @@ import random
 import sys
 import pickle
 
-os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 import numpy as np
 import torch
@@ -479,6 +479,9 @@ def main():
                         type=int,
                         default=-1,
                         help="number of bottom layers frozen")
+    parser.add_argument('--use_crf',
+                        action='store_true',
+                        help="whether to use CRF")
     args = parser.parse_args()
 
     if args.local_rank == -1 or args.no_cuda:
@@ -542,9 +545,15 @@ def main():
             previous_state_dict = OrderedDict()
         distant_state_dict = torch.load(os.path.join(args.trained_model_dir, WEIGHTS_NAME))
         previous_state_dict.update(distant_state_dict) # note that the final layers of previous model and distant model must have different attribute names!
-        model = MyBertPlusCRFForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels, device=device) # hardcode
+        if args.use_crf:
+            model = MyBertPlusCRFForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels, device=device)
+        else:
+            model = MyBertForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels)
     else:
-        model = MyBertPlusCRFForTokenClassification.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=num_labels, device=device) # hardcode
+        if args.use_crf:
+            model = MyBertPlusCRFForTokenClassification.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=num_labels, device=device)
+        else:
+            model = MyBertForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels)
     if args.fp16:
         model.half()
     model.to(device)

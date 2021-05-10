@@ -25,7 +25,7 @@ import random
 import sys
 import pickle
 
-os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 import numpy as np
 import torch
@@ -458,6 +458,9 @@ def main():
     parser.add_argument('--supervised_training',
                         action='store_true',
                         help="Only use this for supervised top-line model")
+    parser.add_argument('--use_crf',
+                        action='store_true',
+                        help="whether to use CRF")
     args = parser.parse_args()
 
     if args.local_rank == -1 or args.no_cuda:
@@ -522,9 +525,15 @@ def main():
             previous_state_dict = OrderedDict()
         distant_state_dict = torch.load(os.path.join(args.trained_model_dir, WEIGHTS_NAME))
         previous_state_dict.update(distant_state_dict) # note that the final layers of previous model and distant model must have different attribute names!
-        model = MyBertPlusCRFForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels, device=device)
+        if args.use_crf:
+            model = MyBertPlusCRFForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels, device=device)
+        else:
+            model = MyBertForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels)
     else:
-        model = MyBertPlusCRFForTokenClassification.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=num_labels, device=device)
+        if args.use_crf:
+            model = MyBertPlusCRFForTokenClassification.from_pretrained(args.bert_model, cache_dir=cache_dir, num_labels=num_labels, device=device)
+        else:
+            model = MyBertForTokenClassification.from_pretrained(args.trained_model_dir, state_dict=previous_state_dict, num_labels=num_labels)
     if args.fp16:
         model.half()
     model.to(device)
@@ -763,7 +772,7 @@ def main():
 
             with torch.no_grad():
                 tmp_test_loss = model(input_ids, segment_ids, input_mask, label_ids, label_mask)
-                logits = model(input_ids, segment_ids, input_mask)
+                logits = model(input_ids, segment_ids, input_mask, label_mask=label_mask)
 
             logits = logits.detach().cpu().numpy()
             label_ids = label_ids.to('cpu').numpy()
